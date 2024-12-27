@@ -1,0 +1,8 @@
+Website = "https://github.com/BieHDC/ollamaui"
+
+[Details]
+  Icon = "Icon.png"
+  Name = "OllamaUI"
+  ID = "biehdc.tool.ollamaui"
+  Version = "0.9"
+  Build = 2
