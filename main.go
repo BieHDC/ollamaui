@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"biehdc.tool.ollamaui/theming"
+	"biehdc.tool.ollamaui/widgetlist"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/cmd/fyne_settings/settings"
@@ -76,36 +78,45 @@ func main() {
 	g.addStopfunc(func() { g.a.Preferences().SetString("lastserver", g.lastserver) })
 
 	// message storage handling
-	// fixme this needs a long convo perf check especially on mobile
-	widgetlistcontainerinner := container.NewVBox()
-	widgetlistcontainer := container.NewVScroll(widgetlistcontainerinner)
-	appendMessage := func(s string, isuser bool) *widget.Label {
-		ll := widget.NewLabel(s)
-		ll.Wrapping = fyne.TextWrapWord
-		if isuser == true {
-			// this is user, fat text to distinguish
-			ll.TextStyle = fyne.TextStyle{Bold: true}
+	var msgList *widgetlist.List
+	msgList = widgetlist.NewList(
+		// length
+		func() int {
+			return len(g.messages)
+		},
+		// create
+		func() fyne.CanvasObject {
+			ll := widget.NewLabel("example text")
+			ll.Wrapping = fyne.TextWrapWord
+			return ll
+		},
+		// update
+		func(lii widgetlist.ListItemID, co fyne.CanvasObject) {
+			item, ok := co.(*widget.Label)
+			if !ok {
+				panic("item is not label")
+			}
+
+			if g.messages[lii].Role == "user" {
+				item.TextStyle = fyne.TextStyle{Bold: true}
+			} else {
+				item.TextStyle = fyne.TextStyle{}
+			}
+
+			// item.Importance = widget.MediumImportance // default // maybe deal with errors
+			item.SetText(g.messages[lii].Content)
+			item.Refresh()
+
+			msgList.SetItemHeight(lii, float64(item.MinSize().Height)) // needed
+		},
+	)
+	msgList.OnItemSecondaryTapped = func(id widgetlist.ListItemID, _ *fyne.PointEvent) {
+		g.a.Clipboard().SetContent(g.messages[id].Content)
+		if !fyne.CurrentDevice().IsMobile() {
+			// android has an on screen notification when something has
+			// been written to the clipboard, only show on desktop
+			dialog.ShowInformation("Message Clipboarded", g.messages[id].Content, g.w)
 		}
-		widgetlistcontainerinner.Objects = append(widgetlistcontainerinner.Objects,
-			NewSecondaryTapperLayer(ll, func(_ *fyne.PointEvent) {
-				g.a.Clipboard().SetContent(ll.Text)
-				if !fyne.CurrentDevice().IsMobile() {
-					// android has an on screen notification when something has
-					// been written to the clipboard, only show on desktop
-					dialog.ShowInformation("Message Clipboarded", ll.Text, g.w)
-				}
-			}),
-			widget.NewSeparator(),
-		)
-		widgetlistcontainer.Refresh()
-		return ll
-	}
-	deletemessages := func() {
-		// the gui
-		widgetlistcontainerinner.Objects = []fyne.CanvasObject{}
-		widgetlistcontainer.Refresh()
-		// the ollama part
-		g.messages = []api.Message{}
 	}
 
 	// chat history
@@ -114,12 +125,6 @@ func main() {
 		err := json.Unmarshal([]byte(chathistory), &g.messages)
 		if err != nil {
 			g.addStartfunc(func() { dialog.ShowError(fmt.Errorf("error loading chathistory: %w", err), g.w) })
-		} else {
-			// make all widgets
-			for _, msg := range g.messages {
-				appendMessage(msg.Content, msg.Role == "user")
-			}
-			widgetlistcontainer.ScrollToBottom()
 		}
 	}
 	g.addStopfunc(func() {
@@ -131,6 +136,19 @@ func main() {
 		}
 		g.a.Preferences().SetString("chathistory", string(b))
 	})
+
+	// scroll to bottom on start with this hack
+	// and then nil ourselves to death
+	var anim *fyne.Animation
+	anim = fyne.NewAnimation(1*time.Second, func(f float32) {
+		msgList.Refresh()
+		msgList.ScrollToBottom()
+		if int(f) == 100 {
+			anim.Stop()
+			anim = nil
+		}
+	})
+	g.addStartfunc(anim.Start)
 
 	// input handing
 	clientCTX := context.Background()
@@ -150,28 +168,24 @@ func main() {
 			return // ignore empty
 		}
 
-		appendMessage(s, true)
-		widgetlistcontainer.ScrollToBottom()
+		g.messages = append(g.messages, api.Message{
+			Role:    "user",
+			Content: s,
+		})
+		msgList.Refresh()
+		msgList.ScrollToBottom()
 
 		// grey out during response
 		usermessage.Disable()
 		usermessage.ActionItem.(fyne.Disableable).Disable()
-		// this is kinda quick and dirty, but all options
-		// to launch this multiple times are disabled
-		// if unsure, handle this more explicit...
 
 		type opt struct {
 			err error
-			msg string
+			msg api.Message
 		}
 		msgflow := make(chan opt)
 		go func() {
 			defer close(msgflow)
-
-			g.messages = append(g.messages, api.Message{
-				Role:    "user",
-				Content: s,
-			})
 
 			req := &api.ChatRequest{
 				Model:    g.model,
@@ -187,47 +201,42 @@ func main() {
 			respFunc := func(resp api.ChatResponse) error {
 				msg.Content += resp.Message.Content
 				msg.Content = strings.TrimPrefix(msg.Content, " ")
-				msgflow <- opt{msg: msg.Content}
+				msgflow <- opt{msg: msg}
 				return nil
 			}
 
 			err := client.Chat(clientCTX, req, respFunc)
 			if err != nil {
-				msgflow <- opt{err: errors.New(strings.TrimSpace(msg.Content + "\n\nError: " + err.Error()))}
-				return // bail to not add errored message to history and dont delete the prompt
+				msgflow <- opt{err: err, msg: msg}
 			}
-
-			g.messages = append(g.messages, msg)
 		}()
 
 		go func() {
-			// setup
-			var ll *widget.Label
-			fyne.DoAndWait(func() {
-				ll = appendMessage("", false)
-			})
+			g.messages = append(g.messages, api.Message{})
+			index := len(g.messages) - 1
 
 			// when we error, we keep the prompt,
 			// so the user can redispatch it
 			preserveUsermessage := false
 			// mainloop
 			for msg := range msgflow {
+				g.messages[index] = msg.msg
 				fyne.DoAndWait(func() {
 					if msg.err != nil {
-						ll.Importance = widget.DangerImportance
-						ll.SetText(msg.err.Error())
-						widgetlistcontainer.ScrollToBottom()
+						// yea i am doing this the lazy way
+						msg.msg.Content += "\n\n" + "Error: " + msg.err.Error()
+						g.messages[index] = msg.msg
+						msgList.ScrollToBottom()
 						preserveUsermessage = true
 					}
 
-					ll.SetText(msg.msg)
-
-					if len(msg.msg) < 800 {
+					msgList.Refresh()
+					if len(msg.msg.Content) < 800 {
 						// fixme testing scroll along for short texts
 						// but dont if its longer to not mess with reading
 						// seems to work nicely, should be a per device setting
 						// marking as todo until tested on phone
-						widgetlistcontainer.ScrollToBottom()
+						msgList.ScrollToBottom()
 					}
 				})
 			}
@@ -310,7 +319,7 @@ func main() {
 		deletechat := widget.NewButton("Delete History", func() {
 			dialog.ShowConfirm("Delete Chat?", "Is this real?", func(b bool) {
 				if b {
-					deletemessages()
+					g.messages = []api.Message{}
 				}
 			}, setwin)
 		})
@@ -352,7 +361,8 @@ func main() {
 		modelselection,
 	)
 
-	bottom := container.NewVSplit(widgetlistcontainer, container.NewBorder(nil, nil, nil, nil, usermessage))
+	//bottom := container.NewVSplit(widgetlistcontainer, container.NewBorder(nil, nil, nil, nil, usermessage))
+	bottom := container.NewVSplit(msgList, container.NewBorder(nil, nil, nil, nil, usermessage))
 	bottom.Offset = 1.0 // top as big as possible
 	content := container.NewBorder(top, nil, nil, nil, bottom)
 
