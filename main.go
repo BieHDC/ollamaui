@@ -36,6 +36,8 @@ type gui struct {
 }
 
 // fixme
+// scroll down on keyboard open if already scrolled down
+// mobile perf quickly degrages due to widgetism, try port widget list
 // multiple tabs if popular demand/i myself need it
 // search function?
 // tiktok voicegen integration?
@@ -86,7 +88,7 @@ func main() {
 		}
 		widgetlistcontainerinner.Objects = append(widgetlistcontainerinner.Objects,
 			NewSecondaryTapperLayer(ll, func(_ *fyne.PointEvent) {
-				g.w.Clipboard().SetContent(ll.Text)
+				g.a.Clipboard().SetContent(ll.Text)
 				if !fyne.CurrentDevice().IsMobile() {
 					// android has an on screen notification when something has
 					// been written to the clipboard, only show on desktop
@@ -157,9 +159,14 @@ func main() {
 		// this is kinda quick and dirty, but all options
 		// to launch this multiple times are disabled
 		// if unsure, handle this more explicit...
+
+		type opt struct {
+			err error
+			msg string
+		}
+		msgflow := make(chan opt)
 		go func() {
-			defer usermessage.Enable()
-			defer usermessage.ActionItem.(fyne.Disableable).Enable()
+			defer close(msgflow)
 
 			g.messages = append(g.messages, api.Message{
 				Role:    "user",
@@ -177,30 +184,61 @@ func main() {
 
 			var msg api.Message
 			msg.Role = "assistant"
-			ll := appendMessage(msg.Content, false)
 			respFunc := func(resp api.ChatResponse) error {
 				msg.Content += resp.Message.Content
-				ll.SetText(msg.Content)
-				if len(msg.Content) < 800 {
-					// fixme testing scroll along for short texts
-					// but dont if its longer to not mess with reading
-					// seems to work nicely, should be a per device setting
-					// marking as todo until tested on phone
-					widgetlistcontainer.ScrollToBottom()
-				}
+				msgflow <- opt{msg: msg.Content}
 				return nil
 			}
 
 			err := client.Chat(ctx, req, respFunc)
 			if err != nil {
-				ll.Importance = widget.DangerImportance
-				ll.SetText(strings.TrimSpace(ll.Text + "\n\nError: " + err.Error()))
-				widgetlistcontainer.ScrollToBottom()
+				msgflow <- opt{err: errors.New(strings.TrimSpace(msg.Content + "\n\nError: " + err.Error()))}
 				return // bail to not add errored message to history and dont delete the prompt
 			}
 
 			g.messages = append(g.messages, msg)
-			usermessage.SetText("")
+		}()
+
+		go func() {
+			// setup
+			var ll *widget.Label
+			fyne.DoAndWait(func() {
+				ll = appendMessage("", false)
+			})
+
+			// when we error, we keep the prompt,
+			// so the user can redispatch it
+			preserveUsermessage := false
+			// mainloop
+			for msg := range msgflow {
+				fyne.DoAndWait(func() {
+					if msg.err != nil {
+						ll.Importance = widget.DangerImportance
+						ll.SetText(msg.err.Error())
+						widgetlistcontainer.ScrollToBottom()
+						preserveUsermessage = true
+					}
+
+					ll.SetText(msg.msg)
+
+					if len(msg.msg) < 800 {
+						// fixme testing scroll along for short texts
+						// but dont if its longer to not mess with reading
+						// seems to work nicely, should be a per device setting
+						// marking as todo until tested on phone
+						widgetlistcontainer.ScrollToBottom()
+					}
+				})
+			}
+
+			// cleanup
+			fyne.DoAndWait(func() {
+				if !preserveUsermessage {
+					usermessage.SetText("")
+				}
+				usermessage.ActionItem.(fyne.Disableable).Enable()
+				usermessage.Enable()
+			})
 		}()
 	}
 	usermessage.Refresh()
@@ -324,25 +362,34 @@ func main() {
 
 // settings stuff
 func searchForHosts(hosts *fyne.Container, selected func(string)) {
+	setLabel := func(s string) {
+		fyne.DoAndWait(func() {
+			hosts.Objects[0].(*widget.Label).SetText(s)
+			hosts.Refresh()
+		})
+	}
+	appendObject := func(co fyne.CanvasObject) {
+		fyne.DoAndWait(func() {
+			hosts.Objects = append(hosts.Objects, co)
+			hosts.Refresh()
+		})
+	}
+
 	found := findInstances()
 	num := 0
 	for {
 		h, ok := <-found
 		if !ok { // we read all
-			hosts.Objects[0].(*widget.Label).SetText(fmt.Sprintf("Done Scanning, found %d", num))
-			hosts.Refresh()
+			setLabel((fmt.Sprintf("Done Scanning, found %d", num)))
 			break
 		}
 		if h.err != nil {
-			hosts.Objects = append(hosts.Objects, widget.NewLabel(h.err.Error()))
-			hosts.Refresh()
+			appendObject(widget.NewLabel(h.err.Error()))
 			continue
 		}
 
 		num++
-		hosts.Objects = append(hosts.Objects, widget.NewButtonWithIcon(
-			fmt.Sprintf("%s (%s)", h.url.Host, h.version), theme.MoveUpIcon(), func() { selected(h.url.Host) }))
-		hosts.Refresh()
+		appendObject(widget.NewButtonWithIcon(fmt.Sprintf("%s (%s)", h.url.Host, h.version), theme.MoveUpIcon(), func() { selected(h.url.Host) }))
 	}
 }
 
