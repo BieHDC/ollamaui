@@ -133,7 +133,7 @@ func main() {
 	})
 
 	// input handing
-	ctx := context.Background()
+	clientCTX := context.Background()
 	usermessage := NewEntryTroller()
 	usermessage.ActionItem = widget.NewButtonWithIcon("", theme.MailSendIcon(), func() { usermessage.OnSubmitted(usermessage.Text) })
 	usermessage.PlaceHolder = "Type your message..."
@@ -186,11 +186,12 @@ func main() {
 			msg.Role = "assistant"
 			respFunc := func(resp api.ChatResponse) error {
 				msg.Content += resp.Message.Content
+				msg.Content = strings.TrimPrefix(msg.Content, " ")
 				msgflow <- opt{msg: msg.Content}
 				return nil
 			}
 
-			err := client.Chat(ctx, req, respFunc)
+			err := client.Chat(clientCTX, req, respFunc)
 			if err != nil {
 				msgflow <- opt{err: errors.New(strings.TrimSpace(msg.Content + "\n\nError: " + err.Error()))}
 				return // bail to not add errored message to history and dont delete the prompt
@@ -247,7 +248,7 @@ func main() {
 	const nomodel = "NONE - refresh list"
 	modelselection := widget.NewSelect([]string{}, func(s string) { g.model = s })
 	modelselectionfunc := func() {
-		list, err := client.List(ctx)
+		list, err := client.List(clientCTX)
 		if err != nil {
 			if g.lastserver != "" {
 				// dont pop the box on first starts
@@ -268,7 +269,7 @@ func main() {
 	g.addStartfunc(modelselectionfunc, func() {
 		g.model = g.a.Preferences().StringWithFallback("model", nomodel)
 		modelselection.SetSelected(g.model)
-		warmCacheForModel(g.model, client)
+		go warmCacheForModel(g.model, client)
 	})
 	g.addStopfunc(func() { g.a.Preferences().SetString("model", g.model) })
 
@@ -317,10 +318,10 @@ func main() {
 		c := container.NewBorder(
 			container.NewVBox(manualaddress, confirm),
 			container.NewVBox(
-				g.helpwidget(),
+				g.helpWidget(),
 				deletechat,
-				g.manualthemescaler(),
-				g.fynesettings(),
+				g.manualThemeScaler(),
+				g.fyneSettings(),
 				widget.NewButton("Ok", func() { setwin.Close() }),
 			),
 			nil, nil,
@@ -393,7 +394,7 @@ func searchForHosts(hosts *fyne.Container, selected func(string)) {
 	}
 }
 
-func (g *gui) fynesettings() fyne.CanvasObject {
+func (g *gui) fyneSettings() fyne.CanvasObject {
 	return widget.NewButton("Appearance", func() {
 		w := g.a.NewWindow("Fyne Settings")
 		w.SetContent(settings.NewSettings().LoadAppearanceScreen(g.w))
@@ -402,7 +403,7 @@ func (g *gui) fynesettings() fyne.CanvasObject {
 	})
 }
 
-func (g *gui) helpwidget() fyne.CanvasObject {
+func (g *gui) helpWidget() fyne.CanvasObject {
 	return widget.NewButton("Information", func() {
 		hwin := g.a.NewWindow("Information")
 		hwin.SetContent(container.NewBorder(
@@ -426,7 +427,7 @@ func helptext() fyne.CanvasObject {
 	return widget.NewRichTextFromMarkdown(s)
 }
 
-func (g *gui) manualthemescaler() fyne.CanvasObject {
+func (g *gui) manualThemeScaler() fyne.CanvasObject {
 	scalevalue := binding.NewString()
 	scaleslider := widget.NewSlider(0.5, 3.0)
 	scaleslider.Step = 0.1
