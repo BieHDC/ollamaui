@@ -10,4 +10,6 @@ If you have any suggestions or improvements feel free to tell me.
 
 ---
 ![Mobile](https://github.com/user-attachments/assets/e18d9083-c51d-4695-b052-e2898c8404bb)
-![Desktop and Settings](https://github.com/user-attachments/assets/eef5b028-e61d-4fc4-b4b0-13c37cf959c1)
+![Settings](https://github.com/user-attachments/assets/3cf150f8-91cf-453a-9e30-4388143c1bb6)  
+Scroll-Along means how long the response can get before it stops scrolling along. If you set a small number it stops sooner and if you set a very large number it scrolls forever.  
+![Desktop - Markdown and Normal Render](https://github.com/user-attachments/assets/813a2024-b66b-4e95-997d-f5e4d7114728)  
