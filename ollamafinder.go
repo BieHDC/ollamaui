@@ -10,10 +10,45 @@ import (
 	"sync"
 	"time"
 
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/theme"
+	"fyne.io/fyne/v2/widget"
 	"github.com/ollama/ollama/api"
 
 	"github.com/wlynxg/anet" // due to android sdk bugginess that exists for over 2 years
 )
+
+func searchForHosts(hosts *fyne.Container, selected func(string)) {
+	setLabel := func(s string) {
+		fyne.Do(func() {
+			hosts.Objects[0].(*widget.Label).SetText(s)
+			hosts.Refresh()
+		})
+	}
+	appendObject := func(co fyne.CanvasObject) {
+		fyne.Do(func() {
+			hosts.Objects = append(hosts.Objects, co)
+			hosts.Refresh()
+		})
+	}
+
+	found := findInstances()
+	num := 0
+	for {
+		h, ok := <-found
+		if !ok { // we read all
+			setLabel((fmt.Sprintf("Done Scanning, found %d", num)))
+			break
+		}
+		if h.err != nil {
+			appendObject(widget.NewLabel(h.err.Error()))
+			continue
+		}
+
+		num++
+		appendObject(widget.NewButtonWithIcon(fmt.Sprintf("%s (%s)", h.url.Host, h.version), theme.MoveUpIcon(), func() { selected(h.url.Host) }))
+	}
+}
 
 type hosterInfo struct {
 	url     url.URL
@@ -79,7 +114,7 @@ func findInstances() <-chan hosterInfo {
 }
 
 func testServer(surl *url.URL) (string, error) {
-	cl := &http.Client{Timeout: 600 * time.Millisecond}
+	cl := &http.Client{Timeout: 2000 * time.Millisecond}
 	fakeclient := api.NewClient(surl, cl)
 
 	version, err := fakeclient.Version(context.TODO())

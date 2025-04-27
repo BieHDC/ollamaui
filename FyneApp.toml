@@ -5,4 +5,4 @@ Website = "https://github.com/BieHDC/ollamaui"
   Name = "OllamaUI"
   ID = "biehdc.tool.ollamaui"
   Version = "0.9"
-  Build = 2
+  Build = 5

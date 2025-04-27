@@ -2,11 +2,22 @@ package main
 
 import (
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/driver/mobile"
 	"fyne.io/fyne/v2/widget"
 )
 
+func (g *gui) goodEnoughDialog(title, s string) {
+	t := widget.NewLabel(s)
+	t.Wrapping = fyne.TextWrapWord
+	d := dialog.NewCustom(title, "OK", container.NewVScroll(t), g.w)
+	d.Resize(fyne.NewSquareSize(500))
+	d.Show()
+}
+
+/*
 // Attach an arbitrary function to a secondary Tap
 type secondaryTapper struct {
 	widget.BaseWidget
@@ -32,6 +43,7 @@ func NewSecondaryTapperLayer(child fyne.CanvasObject, cb func(*fyne.PointEvent))
 func (st *secondaryTapper) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(st.child)
 }
+*/
 
 // Change the way widget.Entry works for this usecase
 type entryTroller struct {
