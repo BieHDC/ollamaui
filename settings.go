@@ -34,13 +34,17 @@ func (g *gui) helpWidget() fyne.CanvasObject {
 
 func helptext() fyne.CanvasObject {
 	s := "### Information\n"
-	s += "- Right click to copy message\n"
-	s += "- |>> long press on mobile\n"
-	s += "- Do not force close the application\n"
-	s += "- Make your ollama visible on LAN\n"
-	s += "- |>> `OLLAMA_HOST=\"http://0.0.0.0:11434\"`\n"
-	s += "- Make ollama keep the model longer in Cache\n"
-	s += "- |>> `OLLAMA_KEEP_ALIVE=30m`\n"
+	s += "- Right click to copy Message\n"
+	s += "- - Long Press on Mobile\n"
+	s += "- Double Click/Press to delete Message\n"
+	s += "- Normal Render one Click/Press to show\n"
+	s += "- - thinking if the model supports it\n"
+	s += "- Do not force close the Application\n"
+	s += "- Make your Ollama visible on LAN\n"
+	s += "- - `OLLAMA_HOST=\"http://0.0.0.0:11434\"`\n"
+	// we inject this secretly anyway
+	//s += "- Make ollama keep the model longer in Cache\n"
+	//s += "- - `OLLAMA_KEEP_ALIVE=30m`\n"
 	return widget.NewRichTextFromMarkdown(s)
 }
 
@@ -59,7 +63,7 @@ func (g *gui) manualThemeScaler() fyne.CanvasObject {
 	}
 	scaleslider.OnChanged(scaleslider.Value)
 	theming.ApplyTheme(g.a, float32(scaleslider.Value))
-	g.addStopfunc(func() { g.a.Preferences().SetFloat("appscale", scaleslider.Value) })
+	g.addSavefunc(func() { g.a.Preferences().SetFloat("appscale", scaleslider.Value) })
 
 	return container.NewBorder(
 		nil, nil,

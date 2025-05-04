@@ -4,5 +4,8 @@ Website = "https://github.com/BieHDC/ollamaui"
   Icon = "Icon.png"
   Name = "OllamaUI"
   ID = "biehdc.tool.ollamaui"
-  Version = "0.9"
-  Build = 5
+  Version = "0.9.1"
+  Build = 2
+
+[Migrations]
+  fyneDo = true

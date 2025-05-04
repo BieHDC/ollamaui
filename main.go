@@ -7,11 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strconv"
+	"slices"
 	"strings"
 	"time"
-
-	"biehdc.tool.ollamaui/widgetlist"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -28,31 +26,45 @@ type gui struct {
 	w fyne.Window
 	//
 	startfuncs []func()
-	stopfuncs  []func()
+	savefuncs  []func()
 	//
 	model      string
 	messages   []api.Message
 	lastserver string // "" triggers first start behaviour
+	//
+	msgscroller *infiniteScroller // for delete
 }
 
 // fixme
-// scroll down on keyboard open if already scrolled down
+// go run -tags migrated_fynedo .
 // multiple tabs if popular demand/i myself need it
+// - if i do that i should also work to make it more resillient for various gui-races
+// add scroll all up and down buttons to the infi widget
+// - add a scroll down overlay button like a message client?
+// - is that often enough used to warrent being added to the widget?
+// - option to enable or disable said buttons showing?
+// - needs widget with layouting and custom render etc, postponed
 // search function?
 // tiktok voicegen integration?
 // >	https://github.com/gopxl/beep/tree/main
 // >	https://github.com/ebitengine/oto
+
+// i am calling this so often i want to cache it locally
+var isMobile bool
+
 func main() {
 	g := gui{}
 
 	g.a = app.NewWithID("biehdc.priv.ollamagui")
 	g.w = g.a.NewWindow("OllamaUI")
 
+	isMobile = fyne.CurrentDevice().IsMobile()
+
 	// remember and restore window size
 	width := g.a.Preferences().IntWithFallback("width", 400)
 	height := g.a.Preferences().IntWithFallback("heigth", 600)
 	g.w.Resize(fyne.NewSize(float32(width), float32(height)))
-	g.addStopfunc(func() {
+	g.addSavefunc(func() {
 		sz := g.w.Canvas().Size()
 		g.a.Preferences().SetInt("width", int(sz.Width))
 		g.a.Preferences().SetInt("heigth", int(sz.Height))
@@ -72,7 +84,7 @@ func main() {
 			g.addStartfunc(func() { dialog.ShowError(errors.New("last used server could not be contacted"), g.w) })
 		}
 	}
-	g.addStopfunc(func() { g.a.Preferences().SetString("lastserver", g.lastserver) })
+	g.addSavefunc(func() { g.a.Preferences().SetString("lastserver", g.lastserver) })
 
 	// chat history
 	chathistory := g.a.Preferences().String("chathistory")
@@ -82,7 +94,7 @@ func main() {
 			g.addStartfunc(func() { dialog.ShowError(fmt.Errorf("error loading chathistory: %w", err), g.w) })
 		}
 	}
-	g.addStopfunc(func() {
+	g.addSavefunc(func() {
 		b, err := json.Marshal(g.messages)
 		if err != nil {
 			// we cant show a dialog on shutdown
@@ -93,61 +105,74 @@ func main() {
 	})
 
 	// display type
-	var msgList *widgetlist.List
+	lenfunc := func() int { return len(g.messages) }
+	var makeMsgList makeFuncInfiniteScroller
 	msgListContainer := container.NewStack()
+	firstrun := true
 	normalorrich := widget.NewRadioGroup([]string{"Normal", "Markdown"}, func(s string) {
 		switch s {
 		case "Normal":
-			msgList = g.makeNormal()
+			makeMsgList = g.makeNormal()
 		case "Markdown":
-			msgList = g.makeMarkdown()
+			makeMsgList = g.makeMarkdown()
 		}
-		msgListContainer.Objects = []fyne.CanvasObject{msgList}
+		g.msgscroller = newInfiniteScroller(lenfunc, makeMsgList)
+		// fixme this is a fyne bug about concurrent map read and write on richtext
+		// fixed in next point release
+		// replace firstrun/startfunc with fyne.Do() on update and see if that also
+		// works for scrolling and being scrolled down on startup with a long history
+		// so it does not jump to the middle
+		if firstrun {
+			g.addStartfunc(g.msgscroller.GoToBottom)
+			firstrun = false
+		} else {
+			g.msgscroller.GoToBottom()
+		}
+		msgListContainer.Objects = []fyne.CanvasObject{g.msgscroller.GetCanvasObject()}
 		msgListContainer.Refresh()
 	})
 	normalorrich.Horizontal = true
-	normalorrich.SetSelected(g.a.Preferences().StringWithFallback("renderer", "Normal"))
-	g.addStopfunc(func() { g.a.Preferences().SetString("renderer", normalorrich.Selected) })
-
-	// scroll limit
-	const defaultScroller = 800
-	scroller := g.a.Preferences().IntWithFallback("scrolllimit", defaultScroller)
-	scrollLimit := widget.NewEntry()
-	scrollLimit.ActionItem = widget.NewButtonWithIcon("", theme.MailSendIcon(), func() { scrollLimit.OnSubmitted(scrollLimit.Text) })
-	scrollLimit.PlaceHolder = fmt.Sprintf("%d", defaultScroller)
-	scrollLimit.Text = fmt.Sprintf("%d", scroller)
-	g.addStopfunc(func() { g.a.Preferences().SetInt("scrolllimit", scroller) })
-	//scrollLimit.OnSubmitted is being set by settingswindow
-	scrollLimitSubmitted := func(s string) error {
-		if s == "" {
-			// apply the default in this case
-			s = scrollLimit.PlaceHolder
-			scrollLimit.Text = s
-			scrollLimit.Refresh()
-		}
-
-		asnumber, err := strconv.Atoi(s)
-		if err != nil {
-			return fmt.Errorf("%s is not a number", s)
-		}
-		scroller = asnumber
-		return nil
-	}
-	scrollLimit.Refresh()
-	scrollLimitSubmitted(scrollLimit.Text)
+	normalorrich.SetSelected(g.a.Preferences().StringWithFallback("renderer", "Normal")) //invokes first create
+	g.addSavefunc(func() { g.a.Preferences().SetString("renderer", normalorrich.Selected) })
 
 	// input handing
 	clientCTX := context.Background()
 	usermessage := NewEntryTroller()
+	if isMobile {
+		// opening the softkeyboard resizes the window, but the scroll container
+		// does not respect the fact that we are scrolled to the bottom. now when
+		// the user wants to reply and opens the keyboard, he cant read the text
+		// at the bottom for reference, and it looks bad too. the same behaviour
+		// happens when you make a desktop window smaller, the scroll does not stay
+		// scrolled to the very bottom if we are at the very bottom.
+		// we can handle this case decently, we only cant handle a softkeyboard
+		// closing itself and the user reopening it by clicking again before clicking
+		// something else first. we manually call usermessage.FocusLost() in OnSubmitted
+		// in the end so we can detect the next opening and do this dance again.
+		usermessage.SetFocusGainedCallback(func() {
+			go func() {
+				// we need a delay, we cant query the animation
+				// length, go with this. cope and seethe.
+				<-time.After(1 * time.Second)
+				fyne.Do(func() {
+					g.msgscroller.GoToBottomIfAtBottom()
+				})
+			}()
+		})
+	}
 	usermessage.ActionItem = widget.NewButtonWithIcon("", theme.MailSendIcon(), func() { usermessage.OnSubmitted(usermessage.Text) })
 	usermessage.PlaceHolder = "Type your message..."
 	usermessage.Text = g.a.Preferences().StringWithFallback("lastprompt", "Hello friend. What is your name and task?")
-	g.addStopfunc(func() { g.a.Preferences().SetString("lastprompt", usermessage.Text) })
+	g.addSavefunc(func() { g.a.Preferences().SetString("lastprompt", usermessage.Text) })
 	usermessage.SetMinRowsVisible(2)
 	usermessage.Wrapping = fyne.TextWrapWord
 	usermessage.MultiLine = true
 	usermessage.OnSubmitted = func(s string) {
 		if s == "" {
+			if isMobile {
+				// tldr mobile softkeyboard close unfocus entry
+				g.w.Canvas().Unfocus()
+			}
 			return // ignore empty
 		}
 
@@ -171,8 +196,7 @@ func main() {
 
 		g.messages = append(g.messages, api.Message{})
 		index := len(g.messages) - 1
-		msgList.Refresh()
-		msgList.ScrollToBottom()
+		g.msgscroller.GoToBottom()
 
 		type opt struct {
 			err error
@@ -206,16 +230,17 @@ func main() {
 					g.messages[index] = msg.msg
 
 					if msg.err != nil {
-						// yea i am doing this the lazy way
-						msg.msg.Content += "\n\n" + "Error: " + msg.err.Error()
-						g.messages[index] = msg.msg
-						msgList.ScrollToBottom()
+						dialog.ShowError(msg.err, g.w)
 						preserveUsermessage = true
+						// rollback - remove usermessage
+						// and the space for the ai response
+						g.messages = g.messages[:index-1]
 					}
 
-					msgList.Refresh()
-					if len(msg.msg.Content) < scroller {
-						msgList.ScrollToBottom()
+					if !g.msgscroller.GoToBottomIfAtBottom() {
+						// we still need to refresh even
+						// if we dont scroll to bottom
+						g.msgscroller.RefreshCurrent()
 					}
 				})
 			}
@@ -227,6 +252,11 @@ func main() {
 				}
 				usermessage.ActionItem.(fyne.Disableable).Enable()
 				usermessage.Enable()
+				if isMobile {
+					// for mobile softkeyboard and resizing and
+					// scrolling reasons. see setFocusGainedCallback
+					g.w.Canvas().Unfocus()
+				}
 			})
 		}()
 	}
@@ -259,7 +289,7 @@ func main() {
 		modelselection.SetSelected(g.model)
 		go warmCacheForModel(g.model, client)
 	})
-	g.addStopfunc(func() { g.a.Preferences().SetString("model", g.model) })
+	g.addSavefunc(func() { g.a.Preferences().SetString("model", g.model) })
 
 	// settings window stuff
 	settingswindowlock := false
@@ -309,7 +339,7 @@ func main() {
 						// dont be able to delete chat while outputting
 						moveon := false
 						for {
-							fyne.DoAndWait(func() {
+							fyne.Do(func() {
 								moveon = !usermessage.Disabled()
 							})
 							if moveon {
@@ -318,7 +348,7 @@ func main() {
 						}
 						fyne.Do(func() {
 							g.messages = []api.Message{}
-							msgListContainer.Refresh()
+							g.msgscroller.scroll.OnScrolled(fyne.Position{}) // redraw
 						})
 					}()
 				}
@@ -328,18 +358,9 @@ func main() {
 		okbutton := widget.NewButton("Ok", func() { setwin.Close() })
 		okbutton.Importance = widget.HighImportance
 
-		// we need a little trixxing
-		scrollLimit.OnSubmitted = func(s string) {
-			err := scrollLimitSubmitted(s)
-			if err != nil {
-				dialog.ShowError(err, setwin)
-			}
-		}
-
 		c := container.NewBorder(
 			container.NewVBox(manualaddress, confirm),
 			container.NewVBox(
-				container.NewBorder(nil, nil, widget.NewLabel("Scroll-Along Limit:"), nil, scrollLimit),
 				container.NewHBox(widget.NewLabel("Render:"), container.NewCenter(normalorrich)),
 				g.helpWidget(),
 				deletechat,
@@ -385,33 +406,41 @@ func main() {
 	bottom := container.NewVSplit(msgListContainer, container.NewBorder(nil, nil, nil, nil, usermessage))
 	bottom.Offset = 1.0 // top as big as possible
 	content := container.NewBorder(top, nil, nil, nil, bottom)
-
 	g.w.SetContent(content)
-	g.setupLifecyclers()
+
+	g.a.Lifecycle().SetOnExitedForeground(func() {
+		for _, f := range g.savefuncs {
+			f()
+		}
+	})
+	g.a.Lifecycle().SetOnStarted(func() {
+		for _, f := range g.startfuncs {
+			f()
+		}
+	})
+	if !isMobile {
+		// this doesnt always work on mobile and
+		// can cause corruption there. we will
+		// only do SetOnExitedForeground here.
+		g.a.Lifecycle().SetOnStopped(func() {
+			for _, f := range g.savefuncs {
+				f()
+			}
+		})
+	}
 	g.w.ShowAndRun()
 }
 
-func (g *gui) makeMarkdown() *widgetlist.List {
-	var msgList *widgetlist.List
-	msgList = widgetlist.NewList(
-		// length
-		func() int {
-			return len(g.messages)
-		},
-		// create
-		func() fyne.CanvasObject {
-			rt := widget.NewRichTextWithText("# heading")
-			rt.Wrapping = fyne.TextWrapWord
-			return rt
-		},
-		// update
-		func(lii widgetlist.ListItemID, co fyne.CanvasObject) {
-			item, ok := co.(*widget.RichText)
-			if !ok {
-				panic("item is not a rich text")
-			}
+func (g *gui) makeMarkdown() makeFuncInfiniteScroller {
+	return func(lbound, ubound int) []fyne.CanvasObject {
+		// you must ensure that lbound and ubound are valid
+		objs := make([]fyne.CanvasObject, 0, (ubound-lbound)*2) // times 2 because we append 2 objects per iteration
+		for i, msg := range g.messages[lbound:ubound] {
+			themessage := msg
+			themessage.Content = strings.TrimSpace(themessage.Content)
 
-			themessage := g.messages[lii]
+			item := widget.NewRichTextWithText("# heading")
+			item.Wrapping = fyne.TextWrapWord
 
 			if themessage.Role == "user" {
 				item.ParseMarkdown("### User  \n")
@@ -451,42 +480,54 @@ func (g *gui) makeMarkdown() *widgetlist.List {
 
 				if lenmessage < 1 {
 					item.AppendMarkdown("Loading...")
-					msgList.ScrollToBottom()
 				}
 			}
 
 			item.Refresh()
-			msgList.SetItemHeight(lii, float64(item.MinSize().Height)) // needed
-		},
-	)
 
-	g.finaliseList(msgList)
+			content := NewTapperLayer(item,
+				// primary
+				nil,
+				// secondary
+				func(_ *fyne.PointEvent) {
+					g.a.Clipboard().SetContent(themessage.Content)
+					if !isMobile {
+						// android has an on screen notification when something has
+						// been written to the clipboard, only show on desktop
+						g.goodEnoughDialog("Message Clipboarded", themessage.Content)
+					}
+				},
+				// double
+				func(_ *fyne.PointEvent) {
+					// we could alternatively change how item works, split it in 2 and do the hover thing from the dev version
+					//dialog.ShowInformation("stuff", "do fun stuff", g.w)
+					dialog.NewConfirm("Delete Message", "Delete this Message?", func(b bool) {
+						if b {
+							g.messages = slices.Delete(g.messages, lbound+i, lbound+i+1)
+							g.msgscroller.scroll.OnScrolled(fyne.Position{}) // redraw
 
-	return msgList
+						}
+					}, g.w).Show()
+				})
+
+			objs = append(objs, content, widget.NewSeparator())
+		}
+
+		return objs
+	}
+
 }
 
-func (g *gui) makeNormal() *widgetlist.List {
-	var msgList *widgetlist.List
-	msgList = widgetlist.NewList(
-		// length
-		func() int {
-			return len(g.messages)
-		},
-		// create
-		func() fyne.CanvasObject {
-			ll := widget.NewLabel("*example text")
-			ll.Wrapping = fyne.TextWrapWord
-			return ll
+func (g *gui) makeNormal() makeFuncInfiniteScroller {
+	return func(lbound, ubound int) []fyne.CanvasObject {
+		// you must ensure that lbound and ubound are valid
+		objs := make([]fyne.CanvasObject, 0, (ubound-lbound)*2) // times 2 because we append 2 objects per iteration
+		for i, msg := range g.messages[lbound:ubound] {
+			themessage := msg
+			themessage.Content = strings.TrimSpace(themessage.Content)
 
-		},
-		// update
-		func(lii widgetlist.ListItemID, co fyne.CanvasObject) {
-			item, ok := co.(*widget.Label)
-			if !ok {
-				panic("item is not label")
-			}
-
-			themessage := g.messages[lii]
+			item := widget.NewLabel("*example text")
+			item.Wrapping = fyne.TextWrapWord
 
 			if themessage.Role == "user" {
 				item.TextStyle = fyne.TextStyle{Bold: true}
@@ -508,61 +549,55 @@ func (g *gui) makeNormal() *widgetlist.List {
 					}
 				} else if !found {
 					// otherwise its simple
-					item.SetText(strings.TrimSpace(themessage.Content))
+					item.SetText(themessage.Content)
 				}
 
 				if lenmessage < 1 {
 					item.SetText("Loading...")
-					msgList.ScrollToBottom()
 				}
 			}
 
 			item.Refresh()
-			msgList.SetItemHeight(lii, float64(item.MinSize().Height)) // needed
-		},
-	)
 
-	g.finaliseList(msgList)
-	msgList.OnItemTapped = func(id widgetlist.ListItemID, _ *fyne.PointEvent) {
-		msg := g.messages[id].Content
+			content := NewTapperLayer(item,
+				// primary
+				func(_ *fyne.PointEvent) {
+					message, found := strings.CutPrefix(themessage.Content, "<think>")
+					if found && len(message) > 1 {
+						thinkstring, _, found := strings.Cut(message, "</think>")
+						if found {
+							g.goodEnoughDialog("Thinker", thinkstring)
+							return
+						}
+					}
+					//dialog.ShowInformation("Thinker", "there is no thought", g.w)
+				},
+				// secondary
+				func(_ *fyne.PointEvent) {
+					g.a.Clipboard().SetContent(themessage.Content)
+					if !isMobile {
+						// android has an on screen notification when something has
+						// been written to the clipboard, only show on desktop
+						g.goodEnoughDialog("Message Clipboarded", themessage.Content)
+					}
+				},
+				// double
+				func(_ *fyne.PointEvent) {
+					// we could alternatively change how item works, split it in 2 and do the hover thing from the dev version
+					//dialog.ShowInformation("stuff", "do fun stuff", g.w)
+					dialog.NewConfirm("Delete Message", "Delete this Message?", func(b bool) {
+						if b {
+							g.messages = slices.Delete(g.messages, lbound+i, lbound+i+1)
+							g.msgscroller.scroll.OnScrolled(fyne.Position{}) // redraw
 
-		message, found := strings.CutPrefix(msg, "<think>")
-		if found && len(message) > 1 {
-			thinkstring, _, found := strings.Cut(message, "</think>")
-			if found {
-				g.goodEnoughDialog("Thinker", strings.TrimSpace(thinkstring))
-				return
-			}
+						}
+					}, g.w).Show()
+				},
+			)
+
+			objs = append(objs, content, widget.NewSeparator())
 		}
-		//dialog.ShowInformation("Thinker", "there is no thought", g.w)
+
+		return objs
 	}
-
-	return msgList
-}
-
-func (g *gui) finaliseList(msgList *widgetlist.List) {
-	msgList.OnItemSecondaryTapped = func(id widgetlist.ListItemID, _ *fyne.PointEvent) {
-		g.a.Clipboard().SetContent(g.messages[id].Content)
-		if !fyne.CurrentDevice().IsMobile() {
-			// android has an on screen notification when something has
-			// been written to the clipboard, only show on desktop
-			g.goodEnoughDialog("Message Clipboarded", g.messages[id].Content)
-		}
-	}
-
-	// scroll to bottom on start with this hack
-	// and then nil ourselves to death
-	var anim *fyne.Animation
-	anim = fyne.NewAnimation(4*time.Second, func(f float32) {
-		msgList.Refresh()
-		msgList.ScrollToBottom()
-		if int(f) == 100 {
-			anim.Stop()
-			anim = nil
-		}
-	})
-	// yes we do need a little dance here
-	g.addStartfunc(func() {
-		go fyne.Do(anim.Start)
-	})
 }

@@ -1,5 +1,7 @@
 package widgetlist
 
+// Keeping this file and implementation for archival purposes
+// we surely need it again at some point
 import (
 	"fmt"
 	"math"

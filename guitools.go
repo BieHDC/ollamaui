@@ -17,43 +17,71 @@ func (g *gui) goodEnoughDialog(title, s string) {
 	d.Show()
 }
 
-/*
-// Attach an arbitrary function to a secondary Tap
-type secondaryTapper struct {
+// Attach an arbitrary function to a primary and secondary Tap
+type tappler struct {
 	widget.BaseWidget
 	child fyne.CanvasObject
-	cb    func(*fyne.PointEvent)
+	cbPri func(*fyne.PointEvent)
+	cbSec func(*fyne.PointEvent)
+	cbDou func(*fyne.PointEvent)
 }
 
-var _ fyne.SecondaryTappable = (*secondaryTapper)(nil)
+var _ fyne.Tappable = (*tappler)(nil)
 
-func (st *secondaryTapper) TappedSecondary(pe *fyne.PointEvent) {
-	if st.cb == nil {
-		panic("no callback set, pointless use of widget")
+func (t *tappler) Tapped(pe *fyne.PointEvent) {
+	if t.cbPri != nil {
+		t.cbPri(pe)
 	}
-	st.cb(pe)
 }
 
-func NewSecondaryTapperLayer(child fyne.CanvasObject, cb func(*fyne.PointEvent)) *secondaryTapper {
-	st := &secondaryTapper{child: child, cb: cb}
-	st.ExtendBaseWidget(st)
-	return st
+var _ fyne.SecondaryTappable = (*tappler)(nil)
+
+func (t *tappler) TappedSecondary(pe *fyne.PointEvent) {
+	if t.cbSec != nil {
+		t.cbSec(pe)
+	}
 }
 
-func (st *secondaryTapper) CreateRenderer() fyne.WidgetRenderer {
-	return widget.NewSimpleRenderer(st.child)
+var _ fyne.DoubleTappable = (*tappler)(nil)
+
+func (t *tappler) DoubleTapped(pe *fyne.PointEvent) {
+	if t.cbDou != nil {
+		t.cbDou(pe)
+	}
 }
-*/
+
+func NewTapperLayer(child fyne.CanvasObject, cbPrimary func(*fyne.PointEvent), cbSecondary func(*fyne.PointEvent), cbDoubleTapped func(*fyne.PointEvent)) *tappler {
+	t := &tappler{child: child, cbPri: cbPrimary, cbSec: cbSecondary, cbDou: cbDoubleTapped}
+	t.ExtendBaseWidget(t)
+	return t
+}
+
+func (t *tappler) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(t.child)
+}
 
 // Change the way widget.Entry works for this usecase
 type entryTroller struct {
 	widget.Entry
-	selectKeyDown bool
+	selectKeyDown       bool
+	focusGainedCallback func()
 }
 
 func (e *entryTroller) Keyboard() mobile.KeyboardType {
 	// pretend we are a single line keyboard with a submit key
 	return mobile.SingleLineKeyboard
+}
+
+func (e *entryTroller) SetFocusGainedCallback(f func()) {
+	e.focusGainedCallback = f
+}
+
+func (e *entryTroller) FocusGained() {
+	// for mobile sneedings
+	if e.focusGainedCallback != nil {
+		e.focusGainedCallback()
+	}
+	e.Entry.FocusGained()
 }
 
 func (e *entryTroller) FocusLost() {
@@ -110,10 +138,11 @@ func (g *gui) addStartfunc(f ...func()) {
 	g.startfuncs = append(g.startfuncs, f...)
 }
 
-func (g *gui) addStopfunc(f ...func()) {
-	g.stopfuncs = append(g.stopfuncs, f...)
+func (g *gui) addSavefunc(f ...func()) {
+	g.savefuncs = append(g.savefuncs, f...)
 }
 
+/*
 func (g *gui) setupLifecyclers() {
 	g.a.Lifecycle().SetOnStarted(func() {
 		for _, f := range g.startfuncs {
@@ -126,6 +155,7 @@ func (g *gui) setupLifecyclers() {
 		}
 	})
 }
+*/
 
 /*
 // Force a minimum size on a widget
